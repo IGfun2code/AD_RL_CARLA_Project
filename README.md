@@ -1,3 +1,7 @@
 # AD_RL_CARLA_Project
-Use .\\.venv\Scripts\activate to activate the environment
+Activate the environment:
+.\\.venv\Scripts\activate
+Bring up the simulation:
+.\CarlaUE4.exe -quality-level=Low -carla-rpc-port=2000 -carla-streaming-port=2001 
+
 
