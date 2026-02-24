@@ -11,5 +11,8 @@ netstat -ano | findstr :2000
 taskkill /F /IM CarlaUE4.exe
 taskkill /F /IM CarlaUE4-Win64-Shipping.exe
 
+### Call to run the left_turn environment in town 01:
+python .\scenarios\unprotected_left_turn.py --town Town01_Opt --hide-layers --freeze-lights --ego-spawn 224 --ego-dest 83 --oncoming-anchor 173 --oncoming-dest 227 --traffic-profile aggressive --n-oncoming 30 --traffic-stream --mean-headway 2.2 --burst-prob 0.2
+
 
 
