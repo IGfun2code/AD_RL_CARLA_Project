@@ -100,13 +100,14 @@ def run_episode(
     # Reset ego pose/velocity/physics
     reset_vehicle(world, handles.ego, handles.ego_start)
 
-    # # Reset traffic stream (keep scene loaded; just recycle vehicles)
-    # if handles.traffic_stream is not None:
-    #     handles.traffic_stream.destroy_all()
-    #     # reset stream timing so it starts spawning immediately
-    #     # (attribute exists in your TrafficStream)
-    #     handles.traffic_stream.next_spawn_t = world.get_snapshot().timestamp.elapsed_seconds
+    # Reset traffic stream (keep scene loaded; just recycle vehicles)
+    if handles.traffic_stream is not None:
+        handles.traffic_stream.destroy_all()
+        # reset stream timing so it starts spawning immediately
+        # (attribute exists in your TrafficStream)
+        handles.traffic_stream.next_spawn_t = world.get_snapshot().timestamp.elapsed_seconds
 
+    warmup_traffic(world, handles, warmup_s=20.0, min_vehicles=3)
     # --- Create baseline agent ---
     ensure_agents_importable()
     if agent_type.lower() == "behavior":
@@ -232,7 +233,7 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--hide-layers", action="store_true")
     parser.add_argument("--freeze-lights", action="store_true")
-
+    
     parser.add_argument("--ego-spawn", type=int, default=224)
     parser.add_argument("--ego-dest", type=int, default=83)
     parser.add_argument("--oncoming-anchor", type=int, default=173)
@@ -240,15 +241,16 @@ def main():
     parser.add_argument("--n-oncoming", type=int, default=30)
     parser.add_argument("--traffic-stream", action="store_true")
     parser.add_argument("--mean-headway", type=float, default=2.2)
-    parser.add_argument("--burst-prob", type=float, default=0.2)
+    parser.add_argument("--burst-prob", type=float, default=0.25)
     parser.add_argument("--traffic-profile", choices=["cautious", "normal", "aggressive"], default="normal")
-
+    parser.add_argument("--traffic_warmup", type=int, default=3)
     # Runner / baseline
     parser.add_argument("--episodes", type=int, default=10)
     parser.add_argument("--agent", choices=["behavior", "basic"], default="behavior")
     parser.add_argument("--behavior", choices=["cautious", "normal", "aggressive"], default="normal")
     parser.add_argument("--timeout-s", type=float, default=60.0)
     parser.add_argument("--dest-radius-m", type=float, default=5.0)
+    
 
     # Output
     parser.add_argument("--out", default="results/baseline_results.csv")
@@ -287,8 +289,6 @@ def main():
     try:
         # Prime one tick so everything is initialized
         world.tick()
-
-        warmup_traffic(world, handles, warmup_s=5.0, min_vehicles=3)
 
         for ep in range(args.episodes):
             r = run_episode(

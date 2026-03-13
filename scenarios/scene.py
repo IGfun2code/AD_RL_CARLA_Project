@@ -97,7 +97,6 @@ class TrafficStream:
         max_active: int = 30,
         mean_headway_s: float = 2.5,
         burst_prob: float = 0.15,
-        spacing_m: float = 10.0,
         aggressiveness: str = "aggressive",
         despawn_radius_m: float = 15.0,
     ):
@@ -109,22 +108,20 @@ class TrafficStream:
         self.max_active = max_active
         self.mean_headway_s = mean_headway_s
         self.burst_prob = burst_prob
-        self.spacing_m = spacing_m
         self.despawn_radius_m = despawn_radius_m
         self.spawn_transform = spawn_transform
-        self.spawn_clearance_m = 15.0          # tweakable
-
         self.vehicles: List[carla.Vehicle] = []
         self.next_spawn_t = 0.0
+        self.spawn_clearance_m = 10.0
 
         if aggressiveness == "aggressive":
             self.speed_diff_const = -5.0
-            self.follow_dist_rng = (2.0, 2.5)
+            self.follow_dist_rng = (1.0, 2.0)
         elif aggressiveness == "normal":
             self.speed_diff_const = 0.0
-            self.follow_dist_rng = (2.5, 4.0)
+            self.follow_dist_rng = (2.0, 3.0)
         else:  # cautious
-            self.speed_diff_const = 10.0
+            self.speed_diff_const = 5.0
             self.follow_dist_rng = (3.0, 6.0)
 
         self.vehicle_bps = [bp for bp in self.world.get_blueprint_library().filter("vehicle.*") if is_allowed_vehicle_bp(bp)]
@@ -413,15 +410,17 @@ def build_scene(
     traffic_profile: str,
     hide_layers: bool,
     freeze_lights: bool,
-    use_stream: bool = True,       # NEW
-    mean_headway_s: float = 2.5,   # NEW
+    use_stream: bool = True,
+    mean_headway_s: float = 2.5,
     burst_prob: float = 0.15,
+    spacing_m: float = 2.5
 ) -> SceneHandles:
     random.seed(seed)
 
     # Load world (Opt map needed for layers). load_world has map_layers flags; default is All. :contentReference[oaicite:13]{index=13}
     world = client.get_world()
     current = world.get_map().name  # often like "/Game/Carla/Maps/Town01_Opt"
+    print(current)
     if not current.endswith(town):
         if hide_layers:
             layers = compose_layers(carla.MapLayer.NONE, carla.MapLayer.Props, carla.MapLayer.Walls)
@@ -479,7 +478,7 @@ def build_scene(
             spawn_transform=spawn_transform,
             path_locs=path_locs,
             despawn_loc=despawn_loc,
-            max_active=n_oncoming,            # keep up to N active
+            max_active=n_oncoming,
             mean_headway_s=mean_headway_s,
             burst_prob=burst_prob,
             aggressiveness=traffic_profile,
@@ -523,7 +522,7 @@ def main():
     parser.add_argument("--oncoming-dest", type=int, default=227)
     parser.add_argument("--traffic-stream", action="store_true")
     parser.add_argument("--mean-headway", type=float, default=2.5)
-    parser.add_argument("--burst-prob", type=float, default=0.15)
+    parser.add_argument("--burst-prob", type=float, default=0.25)
 
     parser.add_argument("--n-oncoming", type=int, default=25)
     parser.add_argument("--traffic-profile", choices=["cautious", "normal", "aggressive"], default="aggressive")
