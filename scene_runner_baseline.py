@@ -11,6 +11,7 @@ from typing import List, Dict, Any, Optional
 import carla
 
 from scenarios.scene import build_scene, reset_vehicle  # type: ignore
+from scenarios.scenario_catalog import apply_scenario_preset
 
 
 def ensure_agents_importable():
@@ -229,6 +230,7 @@ def main():
     parser.add_argument("--port", type=int, default=2000)
 
     # Scene args (same ones you’ve been using)
+    parser.add_argument("--scenario", choices=["left_turn", "highway_merge"], default=None)
     parser.add_argument("--town", default="Town01_Opt")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--hide-layers", action="store_true")
@@ -238,12 +240,12 @@ def main():
     parser.add_argument("--ego-dest", type=int, default=83)
     parser.add_argument("--oncoming-anchor", type=int, default=173)
     parser.add_argument("--oncoming-dest", type=int, default=227)
-    parser.add_argument("--n-oncoming", type=int, default=30)
+    parser.add_argument("--n-oncoming", type=int, default=None)
     parser.add_argument("--traffic-stream", action="store_true")
-    parser.add_argument("--mean-headway", type=float, default=2.2)
-    parser.add_argument("--burst-prob", type=float, default=0.25)
-    parser.add_argument("--traffic-profile", choices=["cautious", "normal", "aggressive"], default="normal")
-    parser.add_argument("--traffic_warmup", type=int, default=3)
+    parser.add_argument("--mean-headway", type=float, default=None)
+    parser.add_argument("--burst-prob", type=float, default=None)
+    parser.add_argument("--traffic-profile", choices=["cautious", "normal", "aggressive"], default=None)
+
     # Runner / baseline
     parser.add_argument("--episodes", type=int, default=10)
     parser.add_argument("--agent", choices=["behavior", "basic"], default="behavior")
@@ -255,6 +257,15 @@ def main():
     # Output
     parser.add_argument("--out", default="results/baseline_results.csv")
     args = parser.parse_args()
+    apply_scenario_preset(args)
+    if args.n_oncoming is None:
+        args.n_oncoming = 30
+    if args.mean_headway is None:
+        args.mean_headway = 2.2
+    if args.burst_prob is None:
+        args.burst_prob = 0.2
+    if args.traffic_profile is None:
+        args.traffic_profile = "normal"
 
     client = carla.Client(args.host, args.port)
     client.set_timeout(60.0)
