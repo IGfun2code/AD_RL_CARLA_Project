@@ -6,9 +6,8 @@ import os
 import sys
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", ".."))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
+if THIS_DIR not in sys.path:
+    sys.path.insert(0, THIS_DIR)
 
 from carla_ppo_env import CarlaPPOEnv
 
@@ -29,10 +28,10 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--device", default="auto")
-    parser.add_argument("--draw-trajectory", action="store_true", help="Draw the PPO local trajectory in CARLA debug view during training.")
-    parser.add_argument("--draw-interval", type=int, default=10, help="Draw every N environment steps.")
-    parser.add_argument("--draw-lifetime-s", type=float, default=0.75, help="Lifetime of debug drawings in seconds.")
-    parser.add_argument("--draw-route", action="store_true", help="Also draw the global A* route backbone.")
+    parser.add_argument("--draw-trajectory", action="store_true")
+    parser.add_argument("--draw-interval", type=int, default=10)
+    parser.add_argument("--draw-lifetime-s", type=float, default=1.0)
+    parser.add_argument("--draw-route", action="store_true")
     return parser.parse_args()
 
 
@@ -80,7 +79,7 @@ def main():
         )
 
         model.learn(total_timesteps=args.timesteps, progress_bar=True)
-        out_path = os.path.join(args.checkpoint_dir, f"dynamic_ppo_{args.scenario}.zip")
+        out_path = os.path.join(args.checkpoint_dir, f"ppo_{args.scenario}.zip")
         model.save(out_path)
         print(f"Saved PPO model to {out_path}")
     finally:

@@ -5,13 +5,11 @@ import argparse
 import csv
 import os
 import sys
+from typing import Any, Dict, List
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.abspath(os.path.join(THIS_DIR, "..", ".."))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
-
-from typing import Any, Dict, List
+if THIS_DIR not in sys.path:
+    sys.path.insert(0, THIS_DIR)
 
 from carla_ppo_env import CarlaPPOEnv
 
@@ -26,11 +24,11 @@ def parse_args():
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--timeout-s", type=float, default=60.0)
     parser.add_argument("--dest-radius-m", type=float, default=5.0)
-    parser.add_argument("--out", default="results/ppo/eval_dynamic_ppo.csv")
-    parser.add_argument("--draw-trajectory", action="store_true", help="Draw the PPO local trajectory in CARLA debug view.")
-    parser.add_argument("--draw-interval", type=int, default=10, help="Draw every N environment steps.")
-    parser.add_argument("--draw-lifetime-s", type=float, default=0.75, help="Lifetime of debug drawings in seconds.")
-    parser.add_argument("--draw-route", action="store_true", help="Also draw the global A* route backbone.")
+    parser.add_argument("--out", default="results/ppo/eval.csv")
+    parser.add_argument("--draw-trajectory", action="store_true")
+    parser.add_argument("--draw-interval", type=int, default=10)
+    parser.add_argument("--draw-lifetime-s", type=float, default=1.0)
+    parser.add_argument("--draw-route", action="store_true")
     return parser.parse_args()
 
 
@@ -90,14 +88,18 @@ def main():
                     "success": episode_info.get("success", False),
                     "crashed": episode_info.get("crashed", False),
                     "timed_out": episode_info.get("timed_out", False),
+                    "stuck": episode_info.get("stuck", False),
                     "steps": episode_info.get("l", 0),
                     "goal_distance": last_info.get("goal_distance", 0.0),
                     "speed_kmh": last_info.get("speed_kmh", 0.0),
+                    "lane_offset_m": last_info.get("lane_offset_m", 0.0),
+                    "target_speed_kmh": last_info.get("target_speed_kmh", 0.0),
+                    "trajectory_points": last_info.get("trajectory_points", 0),
                 }
             )
             print(
                 f"[ep {ep}] success={rows[-1]['success']} crashed={rows[-1]['crashed']} "
-                f"timed_out={rows[-1]['timed_out']} reward={total_reward:.2f}"
+                f"timed_out={rows[-1]['timed_out']} stuck={rows[-1]['stuck']} reward={total_reward:.2f}"
             )
     finally:
         env.close()
