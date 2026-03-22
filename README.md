@@ -15,6 +15,30 @@ taskkill /F /IM CarlaUE4-Win64-Shipping.exe
 Left Turn :::: Ego Vehicle 224 - 83  :::: Traffic 173 - 227 :::: Map - Town 01\
 Highway   :::: Ego Vehicle 54  - 211 :::: Traffic 203 - 137 :::: Map - Town 04
 
+### Baseline runs using scenario presets:
+python .\scene_runner_baseline.py --scenario left_turn --hide-layers --freeze-lights `
+>>   --traffic-stream --agent behavior --behavior aggressive --episodes 100 `
+>>   --out results/left_turn/baseline_behavior_aggressive.csv
+
+python .\scene_runner_baseline.py --scenario highway_merge --hide-layers --freeze-lights `
+>>   --traffic-stream --agent behavior --behavior normal --episodes 100 `
+>>   --out results/highway_merge/baseline_behavior_normal.csv
+
+### PPO training entry points:
+python .\train_ppo.py --scenario left_turn --timesteps 100000
+
+python .\train_ppo.py --scenario highway_merge --timesteps 100000
+
+### PPO evaluation:
+python .\eval_ppo.py --scenario left_turn --model results/ppo/ppo_left_turn.zip `
+>>   --episodes 20 --out results/ppo/left_turn_eval.csv
+
+python .\eval_ppo.py --scenario highway_merge --model results/ppo/ppo_highway_merge.zip `
+>>   --episodes 20 --out results/ppo/highway_merge_eval.csv
+
+### PPO dependencies:
+Install `torch`, `gymnasium`, and `stable-baselines3` into the project environment before training.
+
 ### Call to run the left_turn environment in town 01:
 python .\scene_runner_baseline.py --town Town01_Opt --hide-layers --freeze-lights `
 >>   --ego-spawn 224 --ego-dest 83 --oncoming-anchor 173 --oncoming-dest 227 `
