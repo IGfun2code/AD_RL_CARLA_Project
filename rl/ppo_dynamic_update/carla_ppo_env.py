@@ -156,7 +156,7 @@ class CarlaPPOEnv(gym.Env):
         debug_draw_trajectory: bool = False,
         debug_draw_interval_steps: int = 10,
         debug_draw_lifetime_s: float = 1.0,
-        debug_draw_route: bool = False,
+        debug_draw_route: bool = True,
     ):
         super().__init__()
         if scenario_name not in SCENARIO_PRESETS:
@@ -183,13 +183,13 @@ class CarlaPPOEnv(gym.Env):
         # Planning/tracking configuration.
         self.route_sampling_resolution = 2.0
         self.local_anchor_distances_m = [8.0, 18.0, 30.0]
-        self.max_lateral_offset_m = 3.0
-        self.max_heading_bias_deg = 25.0
+        self.max_lateral_offset_m = 2.0
+        self.max_heading_bias_deg = 15.0
         self.min_target_speed_kmh = 0.0
         self.max_target_speed_kmh = 45.0
         self.local_traj_point_spacing_m = 1.5
         self.max_preview_distance_m = 55.0
-        self.track_preview_m = 6.0
+        self.track_preview_m = 8.0
 
         self.client = carla.Client(self.host, self.port)
         self.client.set_timeout(60.0)
@@ -267,7 +267,7 @@ class CarlaPPOEnv(gym.Env):
         self.global_route_planner = GlobalRoutePlanner(self.world.get_map(), self.route_sampling_resolution)
         self.pid_controller = VehiclePIDController(
             self.handles.ego,
-            args_lateral={"K_P": 1.95, "K_I": 0.05, "K_D": 0.2, "dt": self.dt},
+            args_lateral={"K_P": 1.35, "K_I": 0.00, "K_D": 0.25, "dt": self.dt},
             args_longitudinal={"K_P": 1.0, "K_I": 0.05, "K_D": 0.0, "dt": self.dt},
             max_throttle=0.75,
             max_brake=0.5,
@@ -654,7 +654,7 @@ class CarlaPPOEnv(gym.Env):
         speed_kmh = _speed_kmh(self.handles.ego)
         speed_error = abs(speed_kmh - self.last_target_speed_kmh) / max(self.max_target_speed_kmh, 1.0)
         steer_rate = abs(control.steer - self.prev_control.steer)
-        comfort_penalty = 0.02 * abs(control.steer) + 0.02 * control.brake + 0.015 * speed_error + 0.01 * steer_rate
+        comfort_penalty = 0.03 * abs(control.steer) + 0.02 * control.brake + 0.015 * speed_error + 0.04 * steer_rate
 
         traffic_penalty = 0.0
         ego_loc = self.handles.ego.get_location()
@@ -668,12 +668,13 @@ class CarlaPPOEnv(gym.Env):
                 traffic_penalty += (safe_gap - dist) * 0.10
 
         lane_offset = self._lane_offset_metric()
-        lane_penalty = max(0.0, lane_offset - 0.75) * 0.35
+        lane_penalty = max(0.0, lane_offset - 0.75) * 0.45
 
         idle_penalty = 0.0
         if speed_kmh < 5.0 and goal_distance > 12.0:
             idle_penalty = 0.08
 
+        #traj_shape_penalty = 0.02 * np.mean(np.abs(self.last_lateral_offsets_m)) + 0.01 * abs(self.last_heading_bias_deg) / max(self.max_heading_bias_deg, 1e-3)
         reward = 1.0 * progress - comfort_penalty - traffic_penalty - lane_penalty - idle_penalty - 0.01
         if success:
             reward += 35.0
