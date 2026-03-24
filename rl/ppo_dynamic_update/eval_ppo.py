@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+import datetime as dt
 import os
 import sys
-from typing import Any, Dict, List
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if THIS_DIR not in sys.path:
@@ -25,6 +27,8 @@ def parse_args():
     parser.add_argument("--timeout-s", type=float, default=60.0)
     parser.add_argument("--dest-radius-m", type=float, default=5.0)
     parser.add_argument("--out", default="results/ppo/eval.csv")
+    parser.add_argument("--fail-dir", default="results/ppo_failures")
+    parser.add_argument("--no-rendering", action="store_true")
     parser.add_argument("--draw-trajectory", action="store_true")
     parser.add_argument("--draw-interval", type=int, default=10)
     parser.add_argument("--draw-lifetime-s", type=float, default=1.0)
@@ -42,6 +46,56 @@ def write_csv(path: str, rows: List[Dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def _safe_name(path: str) -> str:
+    return Path(path).stem.replace(" ", "_")
+
+
+def _fail_run_dir(base_dir: str, scenario: str, model_path: str) -> str:
+    stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join(base_dir, scenario, f"{_safe_name(model_path)}_{stamp}")
+    os.makedirs(run_dir, exist_ok=True)
+    return run_dir
+
+
+def classify_failure(trace_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not trace_rows:
+        return {"failure_type": "unknown", "notes": "empty trace"}
+
+    final = trace_rows[-1]
+    max_lane_offset = max(float(r["lane_offset_m"]) for r in trace_rows)
+    final_goal_distance = float(final["goal_distance"])
+    low_speed_ratio = sum(float(r["speed_kmh"]) < 10.0 for r in trace_rows) / max(len(trace_rows), 1)
+    high_traffic_ratio = sum(float(r["traffic_penalty"]) > 0.25 for r in trace_rows) / max(len(trace_rows), 1)
+
+    if max_lane_offset >= 1.0 and final_goal_distance >= 30.0:
+        failure_type = "lane_departure_early_collision"
+    elif final_goal_distance < 12.0 and max_lane_offset >= 0.75:
+        failure_type = "terminal_oscillation_collision"
+    elif final_goal_distance < 12.0:
+        failure_type = "late_collision"
+    elif low_speed_ratio >= 0.35:
+        failure_type = "hesitation_then_collision"
+    elif high_traffic_ratio >= 0.15:
+        failure_type = "closing_speed_or_gap_failure"
+    else:
+        failure_type = "mixed_collision"
+
+    notes = (
+        f"max_lane_offset={max_lane_offset:.3f}; "
+        f"final_goal_distance={final_goal_distance:.3f}; "
+        f"low_speed_ratio={low_speed_ratio:.3f}; "
+        f"high_traffic_ratio={high_traffic_ratio:.3f}"
+    )
+    return {
+        "failure_type": failure_type,
+        "max_lane_offset": max_lane_offset,
+        "final_goal_distance": final_goal_distance,
+        "low_speed_ratio": low_speed_ratio,
+        "high_traffic_ratio": high_traffic_ratio,
+        "notes": notes,
+    }
+
+
 def main():
     args = parse_args()
 
@@ -57,6 +111,7 @@ def main():
         seed=args.seed,
         timeout_s=args.timeout_s,
         dest_radius_m=args.dest_radius_m,
+        no_rendering=args.no_rendering,
         debug_draw_trajectory=args.draw_trajectory,
         debug_draw_interval_steps=args.draw_interval,
         debug_draw_lifetime_s=args.draw_lifetime_s,
@@ -65,6 +120,8 @@ def main():
     model = PPO.load(args.model)
 
     rows: List[Dict[str, Any]] = []
+    fail_rows: List[Dict[str, Any]] = []
+    fail_run_dir: Optional[str] = None
     try:
         for ep in range(args.episodes):
             obs, info = env.reset(seed=args.seed + ep)
@@ -72,31 +129,84 @@ def main():
             truncated = False
             last_info: Dict[str, Any] = dict(info)
             total_reward = 0.0
+            step_rows: List[Dict[str, Any]] = []
 
             while not terminated and not truncated:
                 action, _ = model.predict(obs, deterministic=True)
                 obs, reward, terminated, truncated, step_info = env.step(action)
                 total_reward += reward
                 last_info = step_info
+                step_rows.append(
+                    {
+                        "episode": ep,
+                        "step": len(step_rows),
+                        "reward": reward,
+                        "goal_distance": step_info.get("goal_distance", 0.0),
+                        "speed_kmh": step_info.get("speed_kmh", 0.0),
+                        "lane_offset_m": step_info.get("lane_offset_m", 0.0),
+                        "target_speed_kmh": step_info.get("target_speed_kmh", 0.0),
+                        "trajectory_points": step_info.get("trajectory_points", 0),
+                        "progress_reward": step_info.get("progress_reward", 0.0),
+                        "comfort_penalty": step_info.get("comfort_penalty", 0.0),
+                        "traffic_penalty": step_info.get("traffic_penalty", 0.0),
+                        "path_overlap_penalty": step_info.get("path_overlap_penalty", 0.0),
+                        "early_lane_crash_penalty": step_info.get("early_lane_crash_penalty", 0.0),
+                        "headway_penalty": step_info.get("headway_penalty", 0.0),
+                        "lane_penalty": step_info.get("lane_penalty", 0.0),
+                        "idle_penalty": step_info.get("idle_penalty", 0.0),
+                        "anchor_shape_penalty": step_info.get("anchor_shape_penalty", 0.0),
+                        "action_delta_penalty": step_info.get("action_delta_penalty", 0.0),
+                        "ttc_action_reward": step_info.get("ttc_action_reward", 0.0),
+                        "forward_headway_m": step_info.get("forward_headway_m", 0.0),
+                        "forward_ttc_s": step_info.get("forward_ttc_s", 0.0),
+                        "success": step_info.get("success", False),
+                        "crashed": step_info.get("crashed", False),
+                        "timed_out": step_info.get("timed_out", False),
+                        "stuck": step_info.get("stuck", False),
+                    }
+                )
 
             episode_info = last_info.get("episode", {})
-            rows.append(
-                {
-                    "episode": ep,
-                    "scenario": args.scenario,
-                    "reward": total_reward,
-                    "success": episode_info.get("success", False),
-                    "crashed": episode_info.get("crashed", False),
-                    "timed_out": episode_info.get("timed_out", False),
-                    "stuck": episode_info.get("stuck", False),
-                    "steps": episode_info.get("l", 0),
-                    "goal_distance": last_info.get("goal_distance", 0.0),
-                    "speed_kmh": last_info.get("speed_kmh", 0.0),
-                    "lane_offset_m": last_info.get("lane_offset_m", 0.0),
-                    "target_speed_kmh": last_info.get("target_speed_kmh", 0.0),
-                    "trajectory_points": last_info.get("trajectory_points", 0),
-                }
-            )
+            row = {
+                "episode": ep,
+                "scenario": args.scenario,
+                "reward": total_reward,
+                "success": episode_info.get("success", False),
+                "crashed": episode_info.get("crashed", False),
+                "timed_out": episode_info.get("timed_out", False),
+                "stuck": episode_info.get("stuck", False),
+                "steps": episode_info.get("l", 0),
+                "goal_distance": last_info.get("goal_distance", 0.0),
+                "speed_kmh": last_info.get("speed_kmh", 0.0),
+                "lane_offset_m": last_info.get("lane_offset_m", 0.0),
+                "target_speed_kmh": last_info.get("target_speed_kmh", 0.0),
+                "trajectory_points": last_info.get("trajectory_points", 0),
+            }
+            rows.append(row)
+            if not row["success"]:
+                if fail_run_dir is None:
+                    fail_run_dir = _fail_run_dir(args.fail_dir, args.scenario, args.model)
+                classification = classify_failure(step_rows)
+                fail_rows.append(
+                    {
+                        "episode": ep,
+                        "scenario": args.scenario,
+                        "reward": total_reward,
+                        "success": row["success"],
+                        "crashed": row["crashed"],
+                        "timed_out": row["timed_out"],
+                        "stuck": row["stuck"],
+                        "steps": row["steps"],
+                        "goal_distance": row["goal_distance"],
+                        "lane_offset_m": row["lane_offset_m"],
+                        "target_speed_kmh": row["target_speed_kmh"],
+                        **classification,
+                    }
+                )
+                episode_dir = os.path.join(fail_run_dir, f"episode_{ep:03d}")
+                os.makedirs(episode_dir, exist_ok=True)
+                write_csv(os.path.join(episode_dir, "trace.csv"), step_rows)
+                write_csv(os.path.join(episode_dir, "summary.csv"), [{**row, **classification}])
             print(
                 f"[ep {ep}] success={rows[-1]['success']} crashed={rows[-1]['crashed']} "
                 f"timed_out={rows[-1]['timed_out']} stuck={rows[-1]['stuck']} reward={total_reward:.2f}"
@@ -106,6 +216,9 @@ def main():
 
     write_csv(args.out, rows)
     print(f"Wrote: {args.out}")
+    if fail_run_dir is not None and fail_rows:
+        write_csv(os.path.join(fail_run_dir, "failure_summary.csv"), fail_rows)
+        print(f"Wrote failed episode traces under: {fail_run_dir}")
 
 
 if __name__ == "__main__":

@@ -28,6 +28,7 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--no-rendering", action="store_true")
     parser.add_argument("--draw-trajectory", action="store_true")
     parser.add_argument("--draw-interval", type=int, default=10)
     parser.add_argument("--draw-lifetime-s", type=float, default=1.0)
@@ -57,6 +58,7 @@ def main():
             seed=args.seed,
             timeout_s=args.timeout_s,
             dest_radius_m=args.dest_radius_m,
+            no_rendering=args.no_rendering,
             debug_draw_trajectory=args.draw_trajectory,
             debug_draw_interval_steps=args.draw_interval,
             debug_draw_lifetime_s=args.draw_lifetime_s,

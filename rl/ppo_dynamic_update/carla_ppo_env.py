@@ -110,6 +110,8 @@ class EpisodeStats:
     progress_reward: float = 0.0
     comfort_penalty: float = 0.0
     traffic_penalty: float = 0.0
+    path_overlap_penalty: float = 0.0
+    early_lane_crash_penalty: float = 0.0
     lane_penalty: float = 0.0
     idle_penalty: float = 0.0
     total_reward: float = 0.0
@@ -153,6 +155,7 @@ class CarlaPPOEnv(gym.Env):
         obs_vehicle_count: int = 4,
         obs_radius_m: float = 60.0,
         target_speed_kmh: float = 35.0,
+        no_rendering: bool = False,
         debug_draw_trajectory: bool = False,
         debug_draw_interval_steps: int = 10,
         debug_draw_lifetime_s: float = 1.0,
@@ -174,6 +177,7 @@ class CarlaPPOEnv(gym.Env):
         self.obs_vehicle_count = int(obs_vehicle_count)
         self.obs_radius_m = float(obs_radius_m)
         self.target_speed_kmh = float(target_speed_kmh)
+        self.no_rendering = bool(no_rendering)
 
         self.debug_draw_trajectory = bool(debug_draw_trajectory)
         self.debug_draw_interval_steps = max(1, int(debug_draw_interval_steps))
@@ -183,7 +187,7 @@ class CarlaPPOEnv(gym.Env):
         # Planning/tracking configuration.
         self.route_sampling_resolution = 2.0
         self.local_anchor_distances_m = [8.0, 18.0, 30.0]
-        self.max_lateral_offset_m = 2.0
+        self.max_lateral_offset_m = 1.0
         self.max_heading_bias_deg = 15.0
         self.min_target_speed_kmh = 0.0
         self.max_target_speed_kmh = 45.0
@@ -212,6 +216,9 @@ class CarlaPPOEnv(gym.Env):
         self.last_target_speed_kmh = self.target_speed_kmh
         self.last_lateral_offsets_m = [0.0] * len(self.local_anchor_distances_m)
         self.last_heading_bias_deg = 0.0
+        self.prev_target_speed_kmh = self.target_speed_kmh
+        self.prev_lateral_offsets_m = [0.0] * len(self.local_anchor_distances_m)
+        self.prev_heading_bias_deg = 0.0
         self.last_preview_target: Optional[TrajectoryPoint] = None
         self.prev_control = carla.VehicleControl(throttle=0.0, steer=0.0, brake=0.0)
 
@@ -257,6 +264,10 @@ class CarlaPPOEnv(gym.Env):
         )
         self.world = self.client.get_world()
         settings = self.world.get_settings()
+        if hasattr(settings, "no_rendering_mode"):
+            settings.no_rendering_mode = self.no_rendering
+            self.world.apply_settings(settings)
+            settings = self.world.get_settings()
         self.dt = settings.fixed_delta_seconds or 0.05
         self.collision_events = []
         self.handles.collision_sensor.listen(lambda event: self.collision_events.append(event))
@@ -278,6 +289,9 @@ class CarlaPPOEnv(gym.Env):
         self.last_target_speed_kmh = self.target_speed_kmh
         self.last_lateral_offsets_m = [0.0] * len(self.local_anchor_distances_m)
         self.last_heading_bias_deg = 0.0
+        self.prev_target_speed_kmh = self.target_speed_kmh
+        self.prev_lateral_offsets_m = [0.0] * len(self.local_anchor_distances_m)
+        self.prev_heading_bias_deg = 0.0
         self.last_preview_target = None
         self.local_trajectory = []
 
@@ -508,6 +522,8 @@ class CarlaPPOEnv(gym.Env):
 
     def _tracking_target(self) -> TrajectoryPoint:
         ego_xy = _carla_loc_to_np(self.handles.ego.get_location())
+        goal_distance = self._goal_distance()
+        effective_preview = min(self.track_preview_m, goal_distance)
         if not self.local_trajectory:
             ego_heading = _heading_from_rotation_deg(self.handles.ego.get_transform().rotation)
             return TrajectoryPoint(float(ego_xy[0]), float(ego_xy[1]), ego_heading, self.last_target_speed_kmh)
@@ -518,7 +534,7 @@ class CarlaPPOEnv(gym.Env):
             p0 = self.local_trajectory[idx].as_np()
             p1 = self.local_trajectory[idx + 1].as_np()
             accum += _dist(p0, p1)
-            if accum >= self.track_preview_m:
+            if accum >= effective_preview:
                 return self.local_trajectory[idx + 1]
         return self.local_trajectory[-1]
 
@@ -537,6 +553,83 @@ class CarlaPPOEnv(gym.Env):
     def _vehicle_half_extents(self, vehicle: carla.Vehicle) -> Tuple[float, float]:
         bb = vehicle.bounding_box.extent
         return float(bb.x), float(bb.y)
+
+    def _nearest_forward_conflict(self) -> Tuple[Optional[carla.Vehicle], float, float]:
+        ego_tf = self.handles.ego.get_transform()
+        ego_xy = _carla_loc_to_np(ego_tf.location)
+        ego_yaw = _heading_from_rotation_deg(ego_tf.rotation)
+        ego_vel = self.handles.ego.get_velocity()
+        ego_speed = float(np.linalg.norm([ego_vel.x, ego_vel.y]))
+        c = math.cos(-ego_yaw)
+        s = math.sin(-ego_yaw)
+
+        best_vehicle: Optional[carla.Vehicle] = None
+        best_rel_x = float("inf")
+        best_ttc = float("inf")
+
+        for vehicle in self._active_traffic():
+            other_xy = _carla_loc_to_np(vehicle.get_location())
+            rel_world = other_xy - ego_xy
+            rel_x = float(c * rel_world[0] - s * rel_world[1])
+            rel_y = float(s * rel_world[0] + c * rel_world[1])
+            if rel_x <= 0.0 or abs(rel_y) > 4.0:
+                continue
+
+            other_vel = vehicle.get_velocity()
+            rel_v_world = np.array([other_vel.x - ego_vel.x, other_vel.y - ego_vel.y], dtype=np.float32)
+            rel_vx = float(c * rel_v_world[0] - s * rel_v_world[1])
+            closing_speed = -rel_vx
+            ttc = float("inf")
+            if closing_speed > 1e-3:
+                ttc = rel_x / closing_speed
+
+            if rel_x < best_rel_x:
+                best_vehicle = vehicle
+                best_rel_x = rel_x
+                best_ttc = ttc
+
+        if best_vehicle is None:
+            return None, float("inf"), float("inf")
+        return best_vehicle, best_rel_x, best_ttc
+
+    def _path_overlap_penalty(self) -> float:
+        if not self.local_trajectory:
+            return 0.0
+
+        ego_xy = _carla_loc_to_np(self.handles.ego.get_location())
+        ego_half_len, ego_half_wid = self._vehicle_half_extents(self.handles.ego)
+        ego_radius = math.sqrt(ego_half_len * ego_half_len + ego_half_wid * ego_half_wid)
+        nearest_idx = self._nearest_trajectory_index(ego_xy)
+
+        sampled_points: List[np.ndarray] = []
+        accum = 0.0
+        last_pt = ego_xy
+        for idx in range(nearest_idx, len(self.local_trajectory)):
+            pt = self.local_trajectory[idx].as_np()
+            seg = _dist(last_pt, pt)
+            accum += seg
+            sampled_points.append(pt)
+            last_pt = pt
+            if accum >= 25.0:
+                break
+
+        if not sampled_points:
+            return 0.0
+
+        penalty = 0.0
+        for vehicle in self._active_traffic():
+            other_xy = _carla_loc_to_np(vehicle.get_location())
+            rel = other_xy - ego_xy
+            if float(np.linalg.norm(rel)) > self.obs_radius_m:
+                continue
+
+            other_half_len, other_half_wid = self._vehicle_half_extents(vehicle)
+            safe_gap = 1.5 + ego_radius + math.sqrt(other_half_len * other_half_len + other_half_wid * other_half_wid)
+            min_path_dist = min(_dist(pt, other_xy) for pt in sampled_points)
+            if min_path_dist < safe_gap:
+                penalty += 0.20 * (safe_gap - min_path_dist)
+
+        return penalty
 
     def _neighbor_features(self, vehicle: carla.Vehicle) -> Tuple[float, ...]:
         ego_tf = self.handles.ego.get_transform()
@@ -658,6 +751,12 @@ class CarlaPPOEnv(gym.Env):
 
         traffic_penalty = 0.0
         ego_loc = self.handles.ego.get_location()
+        ego_xy = _carla_loc_to_np(ego_loc)
+        ego_yaw = math.radians(self.handles.ego.get_transform().rotation.yaw)
+        ego_vel = self.handles.ego.get_velocity()
+        ego_vel_xy = np.array([ego_vel.x, ego_vel.y], dtype=np.float32)
+        c = math.cos(-ego_yaw)
+        s = math.sin(-ego_yaw)
         ego_half_len, ego_half_wid = self._vehicle_half_extents(self.handles.ego)
         ego_radius = math.sqrt(ego_half_len * ego_half_len + ego_half_wid * ego_half_wid)
         for vehicle in self._active_traffic():
@@ -667,6 +766,24 @@ class CarlaPPOEnv(gym.Env):
             if dist < safe_gap:
                 traffic_penalty += (safe_gap - dist) * 0.10
 
+            other_loc = vehicle.get_location()
+            other_xy = _carla_loc_to_np(other_loc)
+            rel_world = other_xy - ego_xy
+            rel_x = float(c * rel_world[0] - s * rel_world[1])
+            if rel_x <= 0.0:
+                continue
+
+            other_vel = vehicle.get_velocity()
+            rel_v_world = np.array([other_vel.x - ego_vel_xy[0], other_vel.y - ego_vel_xy[1]], dtype=np.float32)
+            rel_vx = float(c * rel_v_world[0] - s * rel_v_world[1])
+            closing_speed = -rel_vx
+            if closing_speed <= 0.0:
+                continue
+
+            ttc = rel_x / max(closing_speed, 1e-3)
+            if ttc < 3.0:
+                traffic_penalty += 0.3 * (3.0 - ttc)
+
         lane_offset = self._lane_offset_metric()
         lane_penalty = max(0.0, lane_offset - 0.75) * 0.45
 
@@ -674,8 +791,68 @@ class CarlaPPOEnv(gym.Env):
         if speed_kmh < 5.0 and goal_distance > 12.0:
             idle_penalty = 0.08
 
-        #traj_shape_penalty = 0.02 * np.mean(np.abs(self.last_lateral_offsets_m)) + 0.01 * abs(self.last_heading_bias_deg) / max(self.max_heading_bias_deg, 1e-3)
-        reward = 1.0 * progress - comfort_penalty - traffic_penalty - lane_penalty - idle_penalty - 0.01
+        path_overlap_penalty = self._path_overlap_penalty()
+        _, forward_headway, forward_ttc = self._nearest_forward_conflict()
+
+        headway_penalty = 0.0
+        headway_threshold_s = 1.5
+        speed_mps = speed_kmh / 3.6
+        if forward_headway < float("inf") and speed_mps > 1e-3:
+            headway_ratio = forward_headway / max(headway_threshold_s * speed_mps, 1e-3)
+            r_headway = math.log(max(headway_ratio, 1e-3))
+            if r_headway < 0.0:
+                headway_penalty = -0.7 * r_headway
+
+        ttc_action_reward = 0.0
+        ttc_threshold_s = 12.0
+        if forward_ttc < ttc_threshold_s:
+            if control.brake > 0.05:
+                ttc_action_reward += 1.2
+            elif self.last_target_speed_kmh < speed_kmh:
+                ttc_action_reward += 0.6
+            else:
+                ttc_action_reward -= 1.0
+
+        early_lane_crash_penalty = 0.0
+        if crashed and goal_distance >= 30.0:
+            # Heavily punish the dominant failure mode: early crashes with large lateral deviation.
+            early_lane_crash_penalty += 35.0
+            if lane_offset >= 1.0:
+                early_lane_crash_penalty += 25.0
+            if lane_offset >= 1.5:
+                early_lane_crash_penalty += 20.0
+
+        curr_offsets = np.asarray(self.last_lateral_offsets_m, dtype=np.float32)
+        prev_offsets = np.asarray(self.prev_lateral_offsets_m, dtype=np.float32)
+        curr_heading_bias = float(self.last_heading_bias_deg)
+        prev_heading_bias = float(self.prev_heading_bias_deg)
+        curr_speed = float(self.last_target_speed_kmh)
+        prev_speed = float(self.prev_target_speed_kmh)
+        anchor_shape_penalty = (
+            0.03 * float(np.mean(np.abs(curr_offsets)))
+            + 0.04 * float(abs(curr_offsets[0] - 2.0 * curr_offsets[1] + curr_offsets[2]))
+            + 0.015 * abs(curr_heading_bias) / max(self.max_heading_bias_deg, 1e-3)
+        )
+        action_delta_penalty = (
+            0.06 * float(np.mean(np.abs(curr_offsets - prev_offsets)))
+            + 0.03 * abs(curr_heading_bias - prev_heading_bias) / max(self.max_heading_bias_deg, 1e-3)
+            + 0.02 * abs(curr_speed - prev_speed) / max(self.max_target_speed_kmh, 1.0)
+        )
+
+        reward = (
+            1.0 * progress
+            - comfort_penalty
+            - traffic_penalty
+            - path_overlap_penalty
+            - headway_penalty
+            - lane_penalty
+            - idle_penalty
+            - anchor_shape_penalty
+            - action_delta_penalty
+            + ttc_action_reward
+            - early_lane_crash_penalty
+            - 0.01
+        )
         if success:
             reward += 35.0
         if crashed:
@@ -687,8 +864,16 @@ class CarlaPPOEnv(gym.Env):
             "progress_reward": 1.0 * progress,
             "comfort_penalty": comfort_penalty,
             "traffic_penalty": traffic_penalty,
+            "path_overlap_penalty": path_overlap_penalty,
+            "early_lane_crash_penalty": early_lane_crash_penalty,
+            "headway_penalty": headway_penalty,
             "lane_penalty": lane_penalty,
             "idle_penalty": idle_penalty,
+            "anchor_shape_penalty": anchor_shape_penalty,
+            "action_delta_penalty": action_delta_penalty,
+            "ttc_action_reward": ttc_action_reward,
+            "forward_headway_m": forward_headway,
+            "forward_ttc_s": forward_ttc,
             "goal_distance": goal_distance,
         }
         return reward, info
@@ -792,11 +977,16 @@ class CarlaPPOEnv(gym.Env):
         self.stats.progress_reward += reward_info["progress_reward"]
         self.stats.comfort_penalty += reward_info["comfort_penalty"]
         self.stats.traffic_penalty += reward_info["traffic_penalty"]
+        self.stats.path_overlap_penalty += reward_info["path_overlap_penalty"]
+        self.stats.early_lane_crash_penalty += reward_info["early_lane_crash_penalty"]
         self.stats.lane_penalty += reward_info["lane_penalty"]
         self.stats.idle_penalty += reward_info["idle_penalty"]
         if stuck:
             reward -= 8.0
         self.stats.total_reward += reward
+        self.prev_lateral_offsets_m = list(self.last_lateral_offsets_m)
+        self.prev_heading_bias_deg = float(self.last_heading_bias_deg)
+        self.prev_target_speed_kmh = float(self.last_target_speed_kmh)
         self.prev_control = control
 
         info: Dict[str, Any] = {
@@ -810,6 +1000,19 @@ class CarlaPPOEnv(gym.Env):
             "lane_offset_m": self._lane_offset_metric(),
             "target_speed_kmh": self.last_target_speed_kmh,
             "trajectory_points": len(self.local_trajectory),
+            "progress_reward": reward_info["progress_reward"],
+            "comfort_penalty": reward_info["comfort_penalty"],
+            "traffic_penalty": reward_info["traffic_penalty"],
+            "path_overlap_penalty": reward_info["path_overlap_penalty"],
+            "early_lane_crash_penalty": reward_info["early_lane_crash_penalty"],
+            "headway_penalty": reward_info["headway_penalty"],
+            "lane_penalty": reward_info["lane_penalty"],
+            "idle_penalty": reward_info["idle_penalty"],
+            "anchor_shape_penalty": reward_info["anchor_shape_penalty"],
+            "action_delta_penalty": reward_info["action_delta_penalty"],
+            "ttc_action_reward": reward_info["ttc_action_reward"],
+            "forward_headway_m": reward_info["forward_headway_m"],
+            "forward_ttc_s": reward_info["forward_ttc_s"],
         }
         if terminated or truncated:
             info["episode"] = {
@@ -822,6 +1025,8 @@ class CarlaPPOEnv(gym.Env):
                 "progress_reward": self.stats.progress_reward,
                 "comfort_penalty": self.stats.comfort_penalty,
                 "traffic_penalty": self.stats.traffic_penalty,
+                "path_overlap_penalty": self.stats.path_overlap_penalty,
+                "early_lane_crash_penalty": self.stats.early_lane_crash_penalty,
                 "lane_penalty": self.stats.lane_penalty,
                 "idle_penalty": self.stats.idle_penalty,
             }
@@ -842,6 +1047,8 @@ class CarlaPPOEnv(gym.Env):
                 tls[0].freeze(False)
 
             settings = self.world.get_settings()
+            if hasattr(settings, "no_rendering_mode"):
+                settings.no_rendering_mode = False
             settings.synchronous_mode = False
             settings.fixed_delta_seconds = None
             self.world.apply_settings(settings)
