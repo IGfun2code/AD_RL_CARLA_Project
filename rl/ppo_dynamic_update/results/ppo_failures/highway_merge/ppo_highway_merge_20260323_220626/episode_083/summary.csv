@@ -1,0 +1,2 @@
+episode,scenario,reward,success,crashed,timed_out,stuck,steps,goal_distance,speed_kmh,lane_offset_m,target_speed_kmh,trajectory_points,failure_type,max_lane_offset,final_goal_distance,low_speed_ratio,high_traffic_ratio,notes
+83,highway_merge,-287.11356837011607,False,False,False,True,326,50.14853286743164,2.094282019598773e-06,1.0007870197296143,34.84401538968086,34,lane_departure_early_collision,2.0689337253570557,50.14853286743164,0.6717791411042945,0.3159509202453988,max_lane_offset=2.069; final_goal_distance=50.149; low_speed_ratio=0.672; high_traffic_ratio=0.316

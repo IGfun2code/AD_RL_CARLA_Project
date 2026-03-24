@@ -4,12 +4,21 @@
 The PPO stack is no longer selecting from CARLA's pre-existing route waypoints.
 
 New hierarchy:
-- CARLA GlobalRoutePlanner still computes the **global A\*** backbone from the current ego pose to the destination.
-- PPO now parameterizes a **local trajectory segment** every simulator step.
+- CARLA GlobalRoutePlanner computes a **global A\*** backbone from the ego pose to the destination once per episode.
+- PPO parameterizes a **local trajectory segment** every simulator step.
 - The local segment starts at the ego pose, bends relative to the global backbone using learned lateral offsets, then reconnects to the global route and continues to the destination.
 - A PID-based low-level tracker follows the generated local trajectory.
 
-So PPO is now doing **local path generation + speed selection**, not just waypoint lookahead selection.
+So PPO is doing **reactive local path generation + speed selection** on top of a stable long-horizon route, not waypoint lookup and not full global replanning every tick.
+
+## Design goal
+The intended behavior is:
+- keep the end goal and route backbone stable so the task remains destination-driven
+- let PPO behave like a **local planner** that updates every step in response to traffic
+- encourage PPO to make decisive merge and turn decisions in high-interaction areas instead of waiting for all traffic to clear
+- allow global rerouting only as recovery if the ego drifts materially off-route
+
+This means the local trajectory still updates every step, but the full A* route does not.
 
 ## PPO action space
 The action vector now has 5 continuous values:
@@ -52,8 +61,11 @@ The reward now encourages:
 - progress toward the destination
 - staying comfortable and smooth
 - keeping safe clearance using size-aware proximity penalties
+- maintaining safe headway to forward conflicts
+- reacting to low-TTC merge situations with safer speed choices
 - staying near the driving lane / route corridor
 - avoiding idling
+- heavily penalizing early off-center crashes
 - reaching the destination without collision or timeout
 
 ## Files to replace
@@ -83,3 +95,11 @@ python .\eval_ppo.py --scenario highway_merge --model results/ppo/ppo_highway_me
 ```
 
 The evaluation CSV now includes lane offset, target speed, and the number of points in the generated trajectory.
+
+## Current Best Model
+Current best saved dynamic PPO highway-merge checkpoint:
+- `rl/ppo_dynamic_update/results/ppo/ppo_highway_merge.zip`
+
+Current best recorded 100-episode eval for that checkpoint:
+- `rl/ppo_dynamic_update/results/ppo/highway_merge_eval_100.csv`
+- `77 / 100` successes on the latest reviewed run

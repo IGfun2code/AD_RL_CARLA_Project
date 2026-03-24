@@ -130,9 +130,14 @@ class TrajectoryPoint:
 
 class CarlaPPOEnv(gym.Env):
     """
-    Global planner: CARLA GlobalRoutePlanner (A*) generates the route backbone.
-    Local planner: PPO generates a local trajectory segment every simulator step.
+    Global planner: CARLA GlobalRoutePlanner (A*) generates a route backbone once per episode.
+    Local planner: PPO generates a short-horizon local trajectory every simulator step around that fixed route.
     Tracking: CARLA VehiclePIDController tracks a preview waypoint from the PPO-generated trajectory.
+
+    Design intent:
+    - Keep the long-horizon goal and route stable so PPO always knows where the episode should end.
+    - Let PPO react every step to nearby traffic by reshaping only the local trajectory segment.
+    - Reroute globally only as recovery when the ego vehicle drifts materially away from the stored route.
 
     PPO action = [lat_1, lat_2, lat_3, reconnect_heading_bias, target_speed]
     The trajectory is represented internally as waypoints to keep PPO's action space compact.
@@ -194,6 +199,7 @@ class CarlaPPOEnv(gym.Env):
         self.local_traj_point_spacing_m = 1.5
         self.max_preview_distance_m = 55.0
         self.track_preview_m = 8.0
+        self.off_route_reroute_distance_m = 8.0
 
         self.client = carla.Client(self.host, self.port)
         self.client.set_timeout(60.0)
@@ -211,7 +217,12 @@ class CarlaPPOEnv(gym.Env):
         self.route_waypoints: List[carla.Waypoint] = []
         self.route_points_xy: List[np.ndarray] = []
         self.route_index = 0
+        self.global_route_reroutes = 0
         self.local_trajectory: List[TrajectoryPoint] = []
+        self.local_ppo_trajectory: List[TrajectoryPoint] = []
+        self.path_valid = True
+        self.justified_waiting = False
+        self.justified_wait_steps = 0
         self.pid_controller: Optional[VehiclePIDController] = None
         self.last_target_speed_kmh = self.target_speed_kmh
         self.last_lateral_offsets_m = [0.0] * len(self.local_anchor_distances_m)
@@ -294,6 +305,11 @@ class CarlaPPOEnv(gym.Env):
         self.prev_heading_bias_deg = 0.0
         self.last_preview_target = None
         self.local_trajectory = []
+        self.local_ppo_trajectory = []
+        self.global_route_reroutes = 0
+        self.path_valid = True
+        self.justified_waiting = False
+        self.justified_wait_steps = 0
 
     def _warmup_traffic(self) -> None:
         if self.handles is None or self.handles.traffic_stream is None:
@@ -341,6 +357,7 @@ class CarlaPPOEnv(gym.Env):
         return self.handles.ego.get_location().distance(self.handles.ego_destination)
 
     def _refresh_route_from_current_pose(self, start_location: carla.Location) -> None:
+        # This is the long-horizon backbone route. It is intentionally not refreshed every step.
         end_wp = self.world.get_map().get_waypoint(self.handles.ego_destination)
         self.route_plan = self.global_route_planner.trace_route(start_location, end_wp.transform.location)
         if not self.route_plan:
@@ -350,6 +367,7 @@ class CarlaPPOEnv(gym.Env):
         self.route_waypoints = [wp for wp, _ in self.route_plan]
         self.route_points_xy = [_carla_loc_to_np(wp.transform.location) for wp in self.route_waypoints]
         self.route_index = 0
+        self.global_route_reroutes += 1
 
     def _advance_route_index(self) -> None:
         if not self.route_points_xy:
@@ -365,6 +383,25 @@ class CarlaPPOEnv(gym.Env):
                 best_dist = dist
                 best_idx = idx
         self.route_index = best_idx
+
+    def _distance_to_route(self) -> float:
+        if not self.route_points_xy:
+            return float("inf")
+        ego_xy = _carla_loc_to_np(self.handles.ego.get_location())
+        upper = min(len(self.route_points_xy), self.route_index + 40)
+        window = self.route_points_xy[self.route_index:upper]
+        if not window:
+            return float("inf")
+        return min(_dist(ego_xy, pt) for pt in window)
+
+    def _ensure_route_alignment(self) -> None:
+        if not self.route_points_xy:
+            self._refresh_route_from_current_pose(self.handles.ego.get_location())
+            return
+        self._advance_route_index()
+        if self._distance_to_route() > self.off_route_reroute_distance_m:
+            self._refresh_route_from_current_pose(self.handles.ego.get_location())
+            self._advance_route_index()
 
     def _route_point_at_distance(self, start_idx: int, target_dist_m: float) -> Tuple[np.ndarray, float, int]:
         if not self.route_points_xy:
@@ -434,9 +471,10 @@ class CarlaPPOEnv(gym.Env):
         return result
 
     def _trajectory_points_from_action(self, action: np.ndarray) -> List[TrajectoryPoint]:
+        # PPO replans this short-horizon local segment every step while staying anchored to the
+        # stable global route backbone for destination consistency.
         lateral_offsets_m, heading_bias_deg, target_speed_kmh = self._decode_action(action)
-        self._refresh_route_from_current_pose(self.handles.ego.get_location())
-        self._advance_route_index()
+        self._ensure_route_alignment()
 
         ego_tf = self.handles.ego.get_transform()
         ego_xy = _carla_loc_to_np(ego_tf.location)
@@ -504,6 +542,7 @@ class CarlaPPOEnv(gym.Env):
         if not trajectory:
             trajectory = [TrajectoryPoint(float(ego_xy[0]), float(ego_xy[1]), ego_heading, target_speed_kmh)]
         self.local_trajectory = trajectory
+        self.local_ppo_trajectory = trajectory
         return trajectory
 
     def _nearest_trajectory_index(self, ego_xy: np.ndarray, search_limit: int = 60) -> int:
@@ -630,6 +669,27 @@ class CarlaPPOEnv(gym.Env):
                 penalty += 0.20 * (safe_gap - min_path_dist)
 
         return penalty
+
+    def _path_is_valid(self) -> bool:
+        if not self.local_trajectory:
+            return True
+        overlap = self._path_overlap_penalty()
+        _, forward_headway, forward_ttc = self._nearest_forward_conflict()
+        if overlap > 0.55:
+            return False
+        if forward_ttc < 3.0:
+            return False
+        speed_mps = _speed_kmh(self.handles.ego) / 3.6
+        if forward_headway < float("inf") and speed_mps > 1e-3:
+            if forward_headway < 0.8 * speed_mps:
+                return False
+        return True
+
+    def _waiting_target(self) -> TrajectoryPoint:
+        ego_tf = self.handles.ego.get_transform()
+        ego_xy = _carla_loc_to_np(ego_tf.location)
+        ego_heading = _heading_from_rotation_deg(ego_tf.rotation)
+        return TrajectoryPoint(float(ego_xy[0]), float(ego_xy[1]), ego_heading, 0.0)
 
     def _neighbor_features(self, vehicle: carla.Vehicle) -> Tuple[float, ...]:
         ego_tf = self.handles.ego.get_transform()
@@ -788,7 +848,7 @@ class CarlaPPOEnv(gym.Env):
         lane_penalty = max(0.0, lane_offset - 0.75) * 0.45
 
         idle_penalty = 0.0
-        if speed_kmh < 5.0 and goal_distance > 12.0:
+        if speed_kmh < 5.0 and goal_distance > 12.0 and not self.justified_waiting:
             idle_penalty = 0.08
 
         path_overlap_penalty = self._path_overlap_penalty()
@@ -812,6 +872,8 @@ class CarlaPPOEnv(gym.Env):
                 ttc_action_reward += 0.6
             else:
                 ttc_action_reward -= 1.0
+        if self.justified_waiting:
+            ttc_action_reward += 0.5
 
         early_lane_crash_penalty = 0.0
         if crashed and goal_distance >= 30.0:
@@ -934,7 +996,13 @@ class CarlaPPOEnv(gym.Env):
     # ------------------------------
     def step(self, action: np.ndarray):
         self.local_trajectory = self._trajectory_points_from_action(action)
-        target_point = self._tracking_target()
+        self.path_valid = self._path_is_valid()
+        self.justified_waiting = not self.path_valid
+        if self.justified_waiting:
+            self.justified_wait_steps += 1
+        else:
+            self.justified_wait_steps = 0
+        target_point = self._waiting_target() if self.justified_waiting else self._tracking_target()
         self.last_preview_target = target_point
 
         sim_t = self.world.get_snapshot().timestamp.elapsed_seconds
@@ -944,6 +1012,10 @@ class CarlaPPOEnv(gym.Env):
         # Use CARLA PID to track the preview point from the PPO-generated trajectory.
         target_wp = self._trajectory_waypoint_proxy(target_point)
         control = self.pid_controller.run_step(target_point.speed_kmh, target_wp)
+        if self.justified_waiting:
+            control.throttle = 0.0
+            control.brake = max(control.brake, 0.22)
+            control.steer *= 0.35
         control.steer = float(_clamp(control.steer, -0.85, 0.85))
         control.throttle = float(_clamp(control.throttle, 0.0, 0.8))
         control.brake = float(_clamp(control.brake, 0.0, 0.6))
@@ -965,6 +1037,8 @@ class CarlaPPOEnv(gym.Env):
             or speed_kmh > 5.0
         )
         if made_progress:
+            self.stagnation_steps = 0
+        elif self.justified_waiting and self.justified_wait_steps <= 100:
             self.stagnation_steps = 0
         else:
             self.stagnation_steps += 1
@@ -1000,6 +1074,10 @@ class CarlaPPOEnv(gym.Env):
             "lane_offset_m": self._lane_offset_metric(),
             "target_speed_kmh": self.last_target_speed_kmh,
             "trajectory_points": len(self.local_trajectory),
+            "global_route_reroutes": self.global_route_reroutes,
+            "path_valid": self.path_valid,
+            "justified_waiting": self.justified_waiting,
+            "justified_wait_steps": self.justified_wait_steps,
             "progress_reward": reward_info["progress_reward"],
             "comfort_penalty": reward_info["comfort_penalty"],
             "traffic_penalty": reward_info["traffic_penalty"],
