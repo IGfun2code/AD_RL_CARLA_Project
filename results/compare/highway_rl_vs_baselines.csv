@@ -1,0 +1,3 @@
+file,episodes,successes,crashes,success_rate,crash_rate,time_p90_success,max_jerk_p90_success
+.\results\highway_merge\behavior_aggressive_100_aggressive.csv,100,83,17,0.83,0.17,11.60000017285347,446.35408896578707
+.\rl\ppo_dynamic_update\results\ppo\highway_merge_eval_100.csv,100,76,20,0.76,0.2,24.50000036507845,482.04388524180604
