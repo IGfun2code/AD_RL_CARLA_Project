@@ -1,0 +1,2 @@
+episodes,successes,crashes,timeouts,success_rate,clear_success_rate,p90_time_success_s,p50_time_success_s,mean_time_success_s,p90_reward_success,p50_final_goal_distance_m
+100,83,17,0,0.83,0.0,4.9,4.8500000000000005,4.836746987951808,65.3895447734976,4.761631727218628
