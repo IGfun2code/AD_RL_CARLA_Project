@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from datetime import datetime
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if THIS_DIR not in sys.path:
@@ -33,6 +34,7 @@ def parse_args():
     parser.add_argument("--draw-interval", type=int, default=10)
     parser.add_argument("--draw-lifetime-s", type=float, default=1.0)
     parser.add_argument("--draw-route", action="store_true")
+    parser.add_argument('--suffix', type=str, default= '')
     return parser.parse_args()
 
 
@@ -81,7 +83,8 @@ def main():
         )
 
         model.learn(total_timesteps=args.timesteps, progress_bar=True)
-        out_path = os.path.join(args.checkpoint_dir, f"ppo_{args.scenario}.zip")
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S") #can use the time in the file name if wanted
+        out_path = os.path.join(args.checkpoint_dir, f"ppo_{args.scenario}_{args.suffix}.zip")
         model.save(out_path)
         print(f"Saved PPO model to {out_path}")
     finally:

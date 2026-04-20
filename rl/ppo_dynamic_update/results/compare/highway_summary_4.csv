@@ -1,0 +1,2 @@
+file,episodes,successes,crashes,success_rate,crash_rate,time_p90_success,max_jerk_p90_success
+.\rl\ppo_dynamic_update\results\ppo\highway_merge_eval_4.csv,100,64,36,0.64,0.36,13.835000206157567,565.1803769446221

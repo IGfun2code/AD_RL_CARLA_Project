@@ -83,7 +83,7 @@ def main():
         description="Compare highway baseline and RL evaluation CSVs on success rate, P90 completion time, and P90 max jerk."
     )
     ap.add_argument("files", nargs="+", help="CSV files to compare")
-    ap.add_argument("--out", default="results/compare/highway_rl_vs_baselines.csv")
+    ap.add_argument("--out", default="rl/ppo_dynamic_update/results/compare/highway_rl_vs_baselines.csv")
     args = ap.parse_args()
 
     rows_out: List[Dict[str, Any]] = []

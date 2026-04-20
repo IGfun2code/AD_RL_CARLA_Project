@@ -855,7 +855,7 @@ class CarlaPPOEnv(gym.Env):
             float(np.clip(dist / self.obs_radius_m, 0.0, 1.0)),
             float(np.clip((2.0 * half_len) / 15.0, 0.0, 1.0)),
             float(np.clip((2.0 * half_wid) / 6.0, 0.0, 1.0)),
-            float(np.clip(safety_radius / 8.0, 0.0, 1.0)),
+            float(np.clip(safety_radius / 8.0, 0.0, 1.0)), #8 is the maximum safety radius that is possible (it is clipped)
         )
 
     def _lane_offset_metric(self) -> float:
@@ -866,6 +866,17 @@ class CarlaPPOEnv(gym.Env):
             lane_type=carla.LaneType.Driving,
         )
         return float(ego_loc.distance(wp.transform.location))
+    
+    # def _route_deviation_metric(self) -> float:
+    #     if not self.route_points_xy:
+    #         return 0.0
+    #     self._advance_route_index()
+    #     ego_xy = _carla_loc_to_np(self.handles.ego.get_location())
+    #     upper = min(len(self.route_points_xy), self.route_index + 20)
+    #     window = self.route_points_xy[self.route_index:upper]
+    #     if not window:
+    #         return 0.0
+    #     return min(_dist(ego_xy, pt) for pt in window)
 
     def _distance_to_lane_end(self, step_m: float = 2.0, max_lookahead_m: float = 40.0) -> float:
         ego_loc = self.handles.ego.get_location()
@@ -991,12 +1002,23 @@ class CarlaPPOEnv(gym.Env):
             progress = self.prev_goal_distance - goal_distance
         self.prev_goal_distance = goal_distance
 
+
         control = self.handles.ego.get_control()
         speed_kmh = _speed_kmh(self.handles.ego)
-        speed_error = abs(speed_kmh - self.last_target_speed_kmh) / max(self.max_target_speed_kmh, 1.0)
-        steer_rate = abs(control.steer - self.prev_control.steer)
-        comfort_penalty = 0.03 * abs(control.steer) + 0.02 * control.brake + 0.015 * speed_error + 0.04 * steer_rate
 
+
+        # 1) Comfort: keep this simple
+        steer_rate = abs(control.steer - self.prev_control.steer)
+        brake_rate = abs(control.brake - self.prev_control.brake)
+        comfort_penalty = (
+            0.02 * abs(control.steer)
+            + 0.04 * steer_rate
+            + 0.02 * control.brake
+            + 0.02 * brake_rate
+        )
+
+
+        # 2) Safety: proximity + TTC
         traffic_penalty = 0.0
         ego_loc = self.handles.ego.get_location()
         ego_xy = _carla_loc_to_np(ego_loc)
@@ -1005,130 +1027,116 @@ class CarlaPPOEnv(gym.Env):
         ego_vel_xy = np.array([ego_vel.x, ego_vel.y], dtype=np.float32)
         c = math.cos(-ego_yaw)
         s = math.sin(-ego_yaw)
+
+
         ego_half_len, ego_half_wid = self._vehicle_half_extents(self.handles.ego)
         ego_radius = math.sqrt(ego_half_len * ego_half_len + ego_half_wid * ego_half_wid)
+
+
+        min_forward_ttc = float("inf")
+
+
         for vehicle in self._active_traffic():
             other_half_len, other_half_wid = self._vehicle_half_extents(vehicle)
-            safe_gap = 0.8 + ego_radius + math.sqrt(other_half_len * other_half_len + other_half_wid * other_half_wid)
+            other_radius = math.sqrt(other_half_len * other_half_len + other_half_wid * other_half_wid)
+
+
+            # proximity bubble
+            safe_gap = 0.7 + ego_radius + other_radius
             dist = ego_loc.distance(vehicle.get_location())
             if dist < safe_gap:
-                traffic_penalty += (safe_gap - dist) * 0.25
+                traffic_penalty += 0.3 * (safe_gap - dist)
 
-            other_loc = vehicle.get_location()
-            other_xy = _carla_loc_to_np(other_loc)
+
+            # TTC for forward conflicts
+            other_xy = _carla_loc_to_np(vehicle.get_location())
             rel_world = other_xy - ego_xy
             rel_x = float(c * rel_world[0] - s * rel_world[1])
+
+
             if rel_x <= 0.0:
                 continue
+
 
             other_vel = vehicle.get_velocity()
             rel_v_world = np.array([other_vel.x - ego_vel_xy[0], other_vel.y - ego_vel_xy[1]], dtype=np.float32)
             rel_vx = float(c * rel_v_world[0] - s * rel_v_world[1])
             closing_speed = -rel_vx
-            if closing_speed <= 0.0:
-                continue
 
-            ttc = rel_x / max(closing_speed, 1e-3)
-            if ttc < 3.0:
-                traffic_penalty += 0.3 * (3.0 - ttc)
 
+            if closing_speed > 1e-3:
+                ttc = rel_x / closing_speed
+                min_forward_ttc = min(min_forward_ttc, ttc)
+                ttc_buffer = 4.0
+                if ttc < ttc_buffer:
+                    traffic_penalty += 0.50 * (ttc_buffer - ttc)
+
+
+        # 3) Planned-path safety
+        path_overlap_penalty = 0.15 * self._path_overlap_penalty()
+
+
+        # 4) Lane keeping
         lane_offset = self._lane_offset_metric()
-        lane_penalty = max(0.0, lane_offset - 0.75) * 0.55
+        lane_penalty = 0.40 * max(0.0, lane_offset - 0.75)
 
+
+        # 5) Small time penalty so it does not wait forever
+        step_penalty = 0.02
+
+
+        # 6) Make sure the vehicle does not just stay in place to avoid collision
         idle_penalty = 0.0
+        low_speed = speed_kmh < 3.0
+        low_progress = progress < 0.05
 
-        path_overlap_penalty = self._path_overlap_penalty()
-        merge_metrics = self._merge_gap_metrics()
-        speed_mps = speed_kmh / 3.6
-        mean_offset = abs(float(np.mean(self.last_lateral_offsets_m)))
-        launch_from_idle = speed_kmh < 8.0 and self.last_target_speed_kmh > 20.0
-        invalid_creep_penalty = 0.0
-        if self.justified_waiting:
-            invalid_creep_penalty = max(0.0, lane_offset - 0.35) * 0.60
-            if speed_kmh > 2.5:
-                invalid_creep_penalty += 0.03 * min(speed_kmh, 15.0)
-            invalid_creep_penalty += 0.40 * mean_offset
 
-        wait_reward = 0.0
-        build_speed_reward = 0.0
-        lane_end_urgency_penalty = 0.0
+        if goal_distance > 12.0 and low_speed and low_progress:
+                idle_penalty = 0.1
 
-        early_lane_crash_penalty = 0.0
-        if crashed and goal_distance >= 30.0:
-            early_lane_crash_penalty += 25.0
-            if lane_offset >= 1.0:
-                early_lane_crash_penalty += 15.0
-            if lane_offset >= 1.5:
-                early_lane_crash_penalty += 10.0
 
-        unsafe_commit_penalty = 0.0
-        if not self.justified_waiting and mean_offset > 0.15:
-            if merge_metrics["lead_ttc_s"] < merge_metrics["merge_time_target_s"] + 0.8:
-                unsafe_commit_penalty += 1.0 * (
-                    merge_metrics["merge_time_target_s"] + 0.8 - merge_metrics["lead_ttc_s"]
-                )
-            if merge_metrics["rear_ttc_s"] < merge_metrics["merge_time_target_s"] + 1.2:
-                unsafe_commit_penalty += 1.2 * (
-                    merge_metrics["merge_time_target_s"] + 1.2 - merge_metrics["rear_ttc_s"]
-                )
-            if launch_from_idle and merge_metrics["rear_gap_m"] < 18.0:
-                unsafe_commit_penalty += 0.08 * (18.0 - merge_metrics["rear_gap_m"])
 
-        commit_reward = 0.0
-        if (
-            not self.justified_waiting
-            and mean_offset > 0.15
-            and progress > 0.0
-            and merge_metrics["lead_ttc_s"] > merge_metrics["merge_time_target_s"] + 1.0
-            and merge_metrics["rear_ttc_s"] > merge_metrics["merge_time_target_s"] + 1.4
-        ):
-            commit_reward += 0.25 + 0.10 * min(progress, 1.5)
-            if speed_kmh > 10.0:
-                commit_reward += 0.08 * min((speed_kmh - 10.0) / 10.0, 1.0)
-
-        longitudinal_smooth_penalty = 0.0
 
         reward = (
-            1.0 * progress
+            1.2 * progress
             - comfort_penalty
             - traffic_penalty
-            - 0.5 * path_overlap_penalty
+            # - path_overlap_penalty #maybe remove this term since the vehicle can learn to avoid paths that cause crashes. This term causes it to be too restrictive
             - lane_penalty
+            - step_penalty
             - idle_penalty
-            - invalid_creep_penalty
-            - unsafe_commit_penalty
-            - early_lane_crash_penalty
-            + commit_reward
-            - 0.01
         )
+
+
         if success:
-            reward += 35.0
+            reward += 50.0
         if crashed:
-            reward -= 40.0
+            reward -= 50.0
         if timed_out:
-            reward -= 15.0
+            reward -= 50.0
+
 
         info = {
-            "progress_reward": 1.0 * progress,
+            "progress_reward": 1.2 * progress,
             "comfort_penalty": comfort_penalty,
             "traffic_penalty": traffic_penalty,
             "path_overlap_penalty": path_overlap_penalty,
             "lane_penalty": lane_penalty,
             "idle_penalty": idle_penalty,
-            "invalid_creep_penalty": invalid_creep_penalty,
-            "unsafe_commit_penalty": unsafe_commit_penalty,
-            "lane_end_urgency_penalty": lane_end_urgency_penalty,
-            "longitudinal_smooth_penalty": longitudinal_smooth_penalty,
-            "early_lane_crash_penalty": early_lane_crash_penalty,
-            "wait_reward": wait_reward,
-            "build_speed_reward": build_speed_reward,
-            "commit_reward": commit_reward,
-            "lead_gap_m": merge_metrics["lead_gap_m"],
-            "lead_ttc_s": merge_metrics["lead_ttc_s"],
-            "rear_gap_m": merge_metrics["rear_gap_m"],
-            "rear_ttc_s": merge_metrics["rear_ttc_s"],
-            "merge_time_current_s": merge_metrics["merge_time_current_s"],
-            "merge_time_target_s": merge_metrics["merge_time_target_s"],
+            "invalid_creep_penalty": 0.0,
+            "unsafe_commit_penalty": 0.0,
+            "lane_end_urgency_penalty": 0.0,
+            "longitudinal_smooth_penalty": 0.0,
+            "early_lane_crash_penalty": 0.0,
+            "wait_reward": 0.0,
+            "build_speed_reward": 0.0,
+            "commit_reward": 0.0,
+            "lead_gap_m": 0.0,
+            "lead_ttc_s": 0.0 if not math.isfinite(min_forward_ttc) else min_forward_ttc,
+            "rear_gap_m": 0.0,
+            "rear_ttc_s": 0.0,
+            "merge_time_current_s": 0.0,
+            "merge_time_target_s": 0.0,
             "goal_distance": goal_distance,
         }
         return reward, info
@@ -1190,12 +1198,13 @@ class CarlaPPOEnv(gym.Env):
     def step(self, action: np.ndarray):
         self.local_trajectory = self._trajectory_points_from_action(action)
         self.path_valid = self._path_is_valid()
-        self.justified_waiting = not self.path_valid
+        self.justified_waiting = False #not self.path_valid
         if self.justified_waiting:
             self.justified_wait_steps += 1
         else:
             self.justified_wait_steps = 0
-        target_point = self._waiting_target() if self.justified_waiting else self._tracking_target()
+        #this term here sets the target point based on the justified_waiting boolean variable
+        target_point = self._tracking_target() #self._waiting_target() if self.justified_waiting else 
         self.last_preview_target = target_point
 
         sim_t = self.world.get_snapshot().timestamp.elapsed_seconds
