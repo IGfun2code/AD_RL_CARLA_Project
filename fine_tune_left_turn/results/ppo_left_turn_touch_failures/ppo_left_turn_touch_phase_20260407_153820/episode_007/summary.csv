@@ -1,0 +1,2 @@
+episode,reward,success,crashed,timed_out,steps,episode_time_s,goal_distance,speed_kmh,dist_to_conflict,final_phase,phase_touch_idx,failure_type,final_goal_distance,low_speed_ratio,in_clear_ratio,near_conflict_ratio,notes
+7,-22.071472183535807,False,True,False,74,3.7,16.44420623779297,32.7278078704515,2.4561309814453125,CLEAR,13,mixed_failure,16.44420623779297,0.16216216216216217,0.04054054054054054,0.04054054054054054,final_goal_distance=16.444; low_speed_ratio=0.162; in_clear_ratio=0.041; near_conflict_ratio=0.041
