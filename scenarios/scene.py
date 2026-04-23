@@ -164,14 +164,22 @@ class TrafficStream:
             return None
 
         v = v  # type: ignore
-        v.set_autopilot(True, self.tm.get_port())
-        self.tm.set_path(v, self.path_locs)
+        try:
+            v.set_autopilot(True, self.tm.get_port())
+            self.tm.set_path(v, self.path_locs)
 
-        # Keep it stable on 1-lane roads:
-        follow_dist = random.uniform(*self.follow_dist_rng)
-        self.tm.vehicle_percentage_speed_difference(v, self.speed_diff_const)
-        self.tm.distance_to_leading_vehicle(v, follow_dist)
-        self.tm.auto_lane_change(v, False)
+            # Keep it stable on 1-lane roads:
+            follow_dist = random.uniform(*self.follow_dist_rng)
+            self.tm.vehicle_percentage_speed_difference(v, self.speed_diff_const)
+            self.tm.distance_to_leading_vehicle(v, follow_dist)
+            self.tm.auto_lane_change(v, False)
+        except RuntimeError as exc:
+            print(f"Traffic spawn skipped after Traffic Manager timeout: {exc}")
+            try:
+                v.destroy()
+            except RuntimeError:
+                pass
+            return None
 
         return v
 

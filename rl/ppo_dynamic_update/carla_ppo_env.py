@@ -170,6 +170,8 @@ class CarlaPPOEnv(gym.Env):
         debug_draw_interval_steps: int = 10,
         debug_draw_lifetime_s: float = 1.0,
         debug_draw_route: bool = True,
+        obs_noise_std: float = 0.0,
+        action_noise_std: float = 0.0,
     ):
         super().__init__()
         if scenario_name not in SCENARIO_PRESETS:
@@ -193,6 +195,8 @@ class CarlaPPOEnv(gym.Env):
         self.debug_draw_interval_steps = max(1, int(debug_draw_interval_steps))
         self.debug_draw_lifetime_s = float(debug_draw_lifetime_s)
         self.debug_draw_route = bool(debug_draw_route)
+        self.obs_noise_std = max(0.0, float(obs_noise_std))
+        self.action_noise_std = max(0.0, float(action_noise_std))
 
         # Planning/tracking configuration.
         self.route_sampling_resolution = 2.0
@@ -993,7 +997,11 @@ class CarlaPPOEnv(gym.Env):
         while len(obs) < self.observation_space.shape[0]:
             obs.extend([0.0] * 8)
 
-        return np.asarray(obs, dtype=np.float32)
+        obs_arr = np.asarray(obs, dtype=np.float32)
+        if self.obs_noise_std > 0.0:
+            obs_arr = obs_arr + self.np_random.normal(0.0, self.obs_noise_std, size=obs_arr.shape).astype(np.float32)
+            obs_arr = np.clip(obs_arr, self.observation_space.low, self.observation_space.high).astype(np.float32)
+        return obs_arr
 
     def _compute_reward(self, success: bool, crashed: bool, timed_out: bool) -> Tuple[float, Dict[str, float]]:
         goal_distance = self._goal_distance()
@@ -1196,6 +1204,10 @@ class CarlaPPOEnv(gym.Env):
     # Step / close
     # ------------------------------
     def step(self, action: np.ndarray):
+        action = np.asarray(action, dtype=np.float32)
+        if self.action_noise_std > 0.0:
+            action = action + self.np_random.normal(0.0, self.action_noise_std, size=action.shape).astype(np.float32)
+            action = np.clip(action, self.action_space.low, self.action_space.high).astype(np.float32)
         self.local_trajectory = self._trajectory_points_from_action(action)
         self.path_valid = self._path_is_valid()
         self.justified_waiting = False #not self.path_valid
@@ -1361,9 +1373,12 @@ class CarlaPPOEnv(gym.Env):
                 settings.no_rendering_mode = False
             settings.synchronous_mode = False
             settings.fixed_delta_seconds = None
-            self.world.apply_settings(settings)
-            tm.set_synchronous_mode(False)
-            self.world.wait_for_tick(2.0)
+            try:
+                self.world.apply_settings(settings)
+                tm.set_synchronous_mode(False)
+                self.world.wait_for_tick(2.0)
+            except RuntimeError as exc:
+                print(f"Warning: timed out while restoring CARLA sync settings during close: {exc}")
 
             if self.handles.traffic_stream is not None:
                 self.handles.traffic_stream.destroy_all()

@@ -34,6 +34,8 @@ def parse_args():
     parser.add_argument("--draw-interval", type=int, default=10)
     parser.add_argument("--draw-lifetime-s", type=float, default=1.0)
     parser.add_argument("--draw-route", action="store_true")
+    parser.add_argument("--obs-noise-std", type=float, default=0.0)
+    parser.add_argument("--action-noise-std", type=float, default=0.0)
     parser.add_argument('--suffix', type=str, default= '')
     return parser.parse_args()
 
@@ -65,6 +67,8 @@ def main():
             debug_draw_interval_steps=args.draw_interval,
             debug_draw_lifetime_s=args.draw_lifetime_s,
             debug_draw_route=args.draw_route,
+            obs_noise_std=args.obs_noise_std,
+            action_noise_std=args.action_noise_std,
         )
     )
 

@@ -1,0 +1,7 @@
+label,file,episodes,successes,crashes,timeouts,stuck,success_rate,crash_rate,p90_time,p90_jerk
+"Clean PPO
+Clean Env",rl/ppo_dynamic_update/results/ppo/highway_merge_eval_5.csv,100,83,17,0,0,83.0,17.0,15.250000227242708,590.9652832336544
+"Clean PPO
+Noisy Env",rl/ppo_dynamic_update/results/ppo/highway_merge_eval_clean_on_noise.csv,100,86,14,0,0,86.0,14.0,11.800000175833702,377.3967138975004
+"Noisy PPO
+Noisy Env",results/ppo/highway_merge_eval_100_noise_100k.csv,100,68,32,0,0,68.0,32.0,15.250000227242708,576.4563246017752
